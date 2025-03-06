@@ -299,14 +299,11 @@ n1_repo_evo <- c(161,329,349,184,169)
 n_event_repo_evo <- c(768,417,159)
 
 # Numbers from simulation
-n_1st
+n_multi <- c(1344-sum(count_1st[2:6]),576-sum(count_2nd[2:6]),159-sum(count_3rd[2:6]),178-sum(count_4th[2:6])-sum(count_5th[2:6]))
 n_total_evo <- n_1st + n_2nd + n_3rd + n_4th + n_5th
-n_1event_evo <- n_1st - n_2nd
-n_2event_evo <- n_2nd - n_3rd
-n_3event_evo <- n_3rd - n_4th
-n_4event_evo <- n_4th - n_5th
-n_5event_evo <- n_5th
-n_3pevent_evo <- n_3event_evo + n_4event_evo + n_5event_evo
+n_1event_evo <- (n_1st + n_multi[1]) - (n_2nd + n_multi[2])
+n_2event_evo <- (n_2nd + n_multi[2]) - (n_3rd + n_multi[3])
+n_3pevent_evo <- n_3rd + n_multi[3]
 
 n_events_sim = c(n_1event_evo,n_2event_evo,n_3pevent_evo)
 count_sim <- rbind(count_1st,count_2nd, count_3rd,count_4th,count_5th)

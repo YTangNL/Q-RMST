@@ -300,28 +300,23 @@ n1_repo_pla <- c(142,423,394,226,160)
 n_event_repo_pla <- c(806,543,214)
 
 # Numbers from simulation
-n_1st
+n_multi <- c(1563-sum(count_1st[2:6]),757-sum(count_2nd[2:6]),214-sum(count_3rd[2:6]),178-sum(count_4th[2:6])-sum(count_5th[2:6]))
 n_total_pla <- n_1st + n_2nd + n_3rd + n_4th + n_5th
-n_1event_pla <- n_1st - n_2nd
-n_2event_pla <- n_2nd - n_3rd
-n_3event_pla <- n_3rd - n_4th
-n_4event_pla <- n_4th - n_5th
-n_5event_pla <- n_5th
-n_3pevent_pla <- n_3event_pla + n_4event_pla + n_5event_pla
+n_1event_pla <- (n_1st + n_multi[1]) - (n_2nd + n_multi[2])
+n_2event_pla <- (n_2nd + n_multi[2]) - (n_3rd + n_multi[3])
+n_3pevent_pla <- n_3rd + n_multi[3]
 
 n_events_sim = c(n_1event_pla,n_2event_pla,n_3pevent_pla)
 count_sim <- rbind(count_1st,count_2nd, count_3rd,count_4th,count_5th)
 count_cum_sim <- colSums(count_sim)
 
 # output a comparison table
-compare_pla <- data.frame(cumu_events = c(ncum_repo_pla,1921),
+compare_pla <- data.frame(cumu_events = c(ncum_repo_pla,2345),
                           cumu_sim = c(count_cum_sim[2:6],sum(count_cum_sim[2:6])),
-                          first_event = c(n1_repo_pla,1192),
+                          first_event = c(n1_repo_pla,1345),
                           first_sim = c(as.matrix(count_1st[2:6]),sum(count_1st[2:6])),
                           row.names = c("cvd", "mi", "revasc.","stroke", "hospital.","Total"))
 
-# add multiple events same time term
-n_multi <- c(152,53,35,113)
 compare_sub <- data.frame (report = n_event_repo_pla,
                            sim = n_events_sim,
                            row.names = c("subjets with 1 event", "subjets with 2 events", "subjets with 3+ event"))
