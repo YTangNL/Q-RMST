@@ -317,7 +317,6 @@ compare_evo <- data.frame(cumu_events = c(ncum_repo_evo,1921),
                           row.names = c("cvd", "mi", "revasc.","stroke", "hospital.","Total"))
 
 # add multiple events same time term
-n_multi <- c(152,53,35,113)
 compare_sub <- data.frame (report = n_event_repo_evo,
                 sim = n_events_sim,
                 row.names = c("subjets with 1 event", "subjets with 2 events", "subjets with 3+ event"))
