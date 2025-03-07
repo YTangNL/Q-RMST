@@ -245,14 +245,23 @@ res <- data.frame(res)
 
 # censor first event
 res$type1 <- ifelse(res$time1 < ctime, res$type1, 0)
+res$time1 <- ifelse(res$time1 > res$ctime, res$ctime, res$time1)
+res[which(res$type1 == 0), 4:(ncol(res)-1)] <- NA
 # censor second event
 res$type2 <- ifelse(res$time2 < ctime, res$type2, 0)
+res$time2 <- ifelse(res$time2 > res$ctime, res$ctime, res$time2)
+res[which(res$type2 == 0), 6:(ncol(res)-1)] <- NA
 # censor third event
 res$type3 <- ifelse(res$time3 < ctime, res$type3, 0)
+res$time3 <- ifelse(res$time3 > res$ctime, res$ctime, res$time3)
+res[which(res$type3 == 0), 8:(ncol(res)-1)] <- NA
 # censor fourth event
 res$type4 <- ifelse(res$time4 < ctime, res$type4, 0)
+res$time4 <- ifelse(res$time4 > res$ctime, res$ctime, res$time4)
+res[which(res$type4 == 0), 10:(ncol(res)-1)] <- NA
 # censor fifth event
 res$type5 <- ifelse(res$time5 < ctime, res$type5, 0)
+res$time5 <- ifelse(res$time5 > res$ctime, res$ctime, res$time5)
 
 # number of events each time
 n_1st <- sum(res$type1 > 0, na.rm = TRUE)
