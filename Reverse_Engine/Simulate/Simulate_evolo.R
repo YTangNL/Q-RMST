@@ -6,11 +6,11 @@ library(writexl)
 #####
 ## First: check whether we can reconstruct the original (incorrect!) one minus Kaplan-Meiers
 #####
-cvdeath <- read_excel("cvd_ipd.xlsx")
-mi <- read_excel("mi_ipd.xlsx")
-revas <- read_excel("revasc_ipd.xlsx")
-stroke <- read_excel("stroke_ipd.xlsx")
-hosp <- read_excel("hosp_ipd.xlsx")
+cvdeath <- read_excel("Reverse_Engine/Simulate/cvd_ipd.xlsx")
+mi <- read_excel("Reverse_Engine/Simulate/mi_ipd.xlsx")
+revas <- read_excel("Reverse_Engine/Simulate/revasc_ipd.xlsx")
+stroke <- read_excel("Reverse_Engine/Simulate/stroke_ipd.xlsx")
+hosp <- read_excel("Reverse_Engine/Simulate/hosp_ipd.xlsx")
 
 ## Also: check the numbers of events
 cvd_event <- table(cvdeath$status, cvdeath$treat)[2,]
@@ -107,10 +107,10 @@ lines(tseq, 1 - exp(-tmp$rate[2] * tseq), type="l", col = "blue", lty=3)
 ####
 ## We also need a censoring distribution
 ####
-sfcens <- survfit(Surv(time, status==0) ~ treat, data=cvdeath)
+sfcens <- survfit(Surv(time, status==0) ~ treat, data=rbind(cvdeath,mi,revas,stroke,hosp))
 plot(sfcens)
 # This suggests uniform censoring between 20 and 36 months
-censseq <- punif(tseq, 18, 36, lower.tail = FALSE)
+censseq <- punif(tseq, 17, 36, lower.tail = FALSE)
 lines(tseq, censseq, type="l", col="blue", lty=3)
 
 #####
@@ -119,17 +119,36 @@ lines(tseq, censseq, type="l", col="blue", lty=3)
 
 # Assume that for each of the events considered, the rate of first event is
 # the estimated rate of event multiplied by an (as yet unknown) constant, called a
-
-a1 <- c(0.616, 0.66885, 0.447, 0.82, 0.911)
-a2 <- c(1.0, 0.7, 1.3, 0.3, 0.6)
-a3 <- c(0.8, 0.6, 1.2, 0.2, 1.0)
-a4 <- c(1.1, 0.8, 0.8, 0.18, 1.0)
-a5 <- c(2.35, 3.1, 0.5, 0.25, 1.80)
+# by cause
+a_cvd <- c(0.6275, 10, 8, 10.5, 52.5)
+a_mi <- c(0.677, 7, 6, 10.5, 12)
+a_revas <- c(0.4552, 13, 10, 22.5, 51.45)
+a_stroke <- c(0.8280, 3, 2, 7.5, 3.75)
+a_hosp <- c(0.9150, 6, 10, 30.0, 35.25)
+# by time
+# a1 <- c(0.6275, 0.677, 0.4552, 0.828, 0.915)
+# a2 <- c(10, 7, 13, 3, 6)
+# a3 <- c(8 , 6, 10, 2, 10)
+# a4 <- c(10.5, 10.5, 22.5, 7.5, 30.0) 
+# a5 <- c(52.50, 12.00, 51.45, 3.75, 35.25)
   
+# Plot the first series
+plot(a_cvd, type="o", col="red", ylim=c(min(a_cvd, a_mi, a_revas, a_stroke, a_hosp), 
+                                     max(a_cvd, a_mi, a_revas, a_stroke, a_hosp)),
+     xlab="Event Ordinals", ylab="utility", main="Estimated hazard utility")
+
+# Add other series
+lines(a_mi, type="o", col="blue")
+lines(a_revas, type="o", col="green")
+lines(a_stroke, type="o", col="purple")
+lines(a_hosp, type="o", col="orange")
+
+# Add legend
+legend("topleft", legend=c("cvd", "mi", "revasc", "stroke", "hosp"), col=c("red", "blue", "green", "purple", "orange"), lty=1, pch=1)
 # Also assume that for each event type, after an initial first event
 # other than death, the event is double the first event rate
 # maybe also need to assume another constant vector r for relapse chance 
-r <- c(1, 10, 10, 20, 20) # discuss with Jan 
+#r <- c(1, 1, 1, 1, 1) # put r inside a , then don't need r anymore
 
 # Now we are going to generate multiple events for each individual, according
 # to these assumptions, re-estimate cumulative events and check with the original
@@ -145,11 +164,12 @@ res1 <- matrix(NA, n, 11)
 colnames(res1) <- c("id", "time1",'type1',"time2",'type2',"time3",'type3',
                    "time4",'type4','time5',"type5")
 res1[, 1] <- 1:n
-t1 <- rexp(n, rate = r[1]* a1[1] * tmp1$rate[2])
-t2 <- rexp(n, rate = r[1]* a1[2] * tmp2$rate[2])
-t3 <- rexp(n, rate = r[1]* a1[3] * tmp3$rate[2])
-t4 <- rexp(n, rate = r[1]* a1[4] * tmp4$rate[2])
-t5 <- rexp(n, rate = r[1]* a1[5] * tmp5$rate[2])
+# For the first event
+t1 <- rexp(n, rate = a_cvd[1] * tmp1$rate[2])
+t2 <- rexp(n, rate = a_mi[1] * tmp2$rate[2])
+t3 <- rexp(n, rate = a_revas[1] * tmp3$rate[2])
+t4 <- rexp(n, rate = a_stroke[1] * tmp4$rate[2])
+t5 <- rexp(n, rate = a_hosp[1] * tmp5$rate[2])
 tnext <- pmin(t1, t2, t3, t4, t5)
 dnext <- 1
 dnext[tnext == t1] <- 1
@@ -163,11 +183,11 @@ whnext <- which(dnext > 1)
 nnext <- length(whnext)
 
 # After first event, generate second event, except if dnext = 1
-t1 <- rexp(nnext, rate = r[2] * a2[1] * tmp1$rate[2])
-t2 <- rexp(nnext, rate = r[2] * a2[2] * tmp2$rate[2])
-t3 <- rexp(nnext, rate = r[2] * a2[3] * tmp3$rate[2])
-t4 <- rexp(nnext, rate = r[2] * a2[4] * tmp4$rate[2])
-t5 <- rexp(nnext, rate = r[2] * a2[5] * tmp5$rate[2])
+t1 <- rexp(nnext, rate = a_cvd[2] * tmp1$rate[2])
+t2 <- rexp(nnext, rate = a_mi[2] * tmp2$rate[2])
+t3 <- rexp(nnext, rate = a_revas[2] * tmp3$rate[2])
+t4 <- rexp(nnext, rate = a_stroke[2] * tmp4$rate[2])
+t5 <- rexp(nnext, rate = a_hosp[2] * tmp5$rate[2])
 tnext <- pmin(t1, t2, t3, t4, t5)
 dnext <- 1
 dnext[tnext == t1] <- 1
@@ -182,11 +202,11 @@ nnext <- length(whnext)
 
 
 # After second event, generate third event, except if dnext = 1
-t1 <- rexp(nnext, rate = r[3] * a3[1] * tmp1$rate[2])
-t2 <- rexp(nnext, rate = r[3]* a3[2] * tmp2$rate[2])
-t3 <- rexp(nnext, rate = r[3] * a3[3] * tmp3$rate[2])
-t4 <- rexp(nnext, rate = r[3] * a3[4] * tmp4$rate[2])
-t5 <- rexp(nnext, rate = r[3] * a3[5] * tmp5$rate[2])
+t1 <- rexp(nnext, rate = a_cvd[3] * tmp1$rate[2])
+t2 <- rexp(nnext, rate = a_mi[3] * tmp2$rate[2])
+t3 <- rexp(nnext, rate = a_revas[3] * tmp3$rate[2])
+t4 <- rexp(nnext, rate = a_stroke[3] * tmp4$rate[2])
+t5 <- rexp(nnext, rate = a_hosp[3] * tmp5$rate[2])
 tnext <- pmin(t1, t2, t3, t4, t5)
 dnext <- 1
 dnext[tnext == t1] <- 1
@@ -200,11 +220,11 @@ whnext <- whnext[dnext > 1]
 nnext <- length(whnext)
 
 # After third event, generate fourth event, except if dnext = 1
-t1 <- rexp(nnext, rate = r[4] * a4[1] * tmp1$rate[2])
-t2 <- rexp(nnext, rate = r[4] * a4[2] * tmp2$rate[2])
-t3 <- rexp(nnext, rate = r[4] * a4[3] * tmp3$rate[2])
-t4 <- rexp(nnext, rate = r[4] * a4[4] * tmp4$rate[2])
-t5 <- rexp(nnext, rate = r[4] * a4[5] * tmp5$rate[2])
+t1 <- rexp(nnext, rate = a_cvd[4] * tmp1$rate[2])
+t2 <- rexp(nnext, rate = a_mi[4] * tmp2$rate[2])
+t3 <- rexp(nnext, rate = a_revas[4] * tmp3$rate[2])
+t4 <- rexp(nnext, rate = a_stroke[4] * tmp4$rate[2])
+t5 <- rexp(nnext, rate = a_hosp[4] * tmp5$rate[2])
 tnext <- pmin(t1, t2, t3, t4, t5)
 dnext <- 1
 dnext[tnext == t1] <- 1
@@ -218,11 +238,11 @@ whnext <- whnext[dnext > 1]
 nnext <- length(whnext)
 
 # After fourth event, generate fifth (final) event, except if dnext = 1
-t1 <- rexp(nnext, rate = r[5] * a5[1] * tmp1$rate[2])
-t2 <- rexp(nnext, rate = r[5] * a5[2] * tmp2$rate[2])
-t3 <- rexp(nnext, rate = r[5] * a5[3] * tmp3$rate[2])
-t4 <- rexp(nnext, rate = r[5] * a5[4] * tmp4$rate[2])
-t5 <- rexp(nnext, rate = r[5] * a5[5] * tmp5$rate[2])
+t1 <- rexp(nnext, rate = a_cvd[5] * tmp1$rate[2])
+t2 <- rexp(nnext, rate = a_mi[5] * tmp2$rate[2])
+t3 <- rexp(nnext, rate = a_revas[5] * tmp3$rate[2])
+t4 <- rexp(nnext, rate = a_stroke[5] * tmp4$rate[2])
+t5 <- rexp(nnext, rate = a_hosp[5] * tmp5$rate[2])
 tnext <- pmin(t1, t2, t3, t4, t5)
 dnext <- 1
 dnext[tnext == t1] <- 1
@@ -238,7 +258,7 @@ res1[whnext, 11] <- dnext
 ## Fourth: Censor data 
 #####
 set.seed(2025)
-ctime <- runif(n, 18, 36)
+ctime <- runif(n, 17, 36)
 res1 <- cbind(res1,ctime)
 res1 <- data.frame(res1)
 
@@ -295,6 +315,7 @@ count_4th <- table(res1$type4)
 count_4th
 
 count_5th <- table(res1$type5)
+count_5th <- c(count_5th[1:4],0,count_5th[5])
 count_5th
 
 write_xlsx(res1,"censor_evo.xlsx")
