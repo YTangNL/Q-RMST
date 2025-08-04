@@ -1,0 +1,1372 @@
+---
+title: "Appendix: Software"
+author: "TANG"
+date: "2025-07-10"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r library}
+library(mstate)
+library(tidyverse)
+library(readxl)
+library(survival)
+library(stats)
+library(writexl)
+library(survminer)
+```
+
+# Data Simulation
+1. Have some key information:
+  - Kaplan Meier Curves (and numbers) of each type of event (not necessarily as the first event) -> IPDfromKM
+  - Numbers of the first events of each type -> Reverse Engineering 
+  - Numbers of patients with 0, 1, 2, 3+ events -> Reverse Engineering 
+2. Need to illustrate the framework of the new method on the data which we don’t have.
+
+## From KM curves to type-specific IPD: IPDfromKM
+From statistics summary (coordinate points of the curves, study population, total event number, number at risk, time at risk), to a life table with time, status(event or censor), treatment arm.
+
+The type-specific IPD were reconstructed by running the r files under the folder named Data Simulation -> IPDfromKM
+```{r import the result of IPDfromKM}
+cvd <- read_excel("cvd_ipd.xlsx")
+mi <- read_excel("mi_ipd.xlsx")
+revas <- read_excel("revasc_ipd.xlsx")
+stroke <- read_excel("stroke_ipd.xlsx")
+hosp <- read_excel("hosp_ipd.xlsx")
+df_ipd <- rbind(cvd,mi,revas,stroke,hosp)
+```
+
+## From type-specfic IPD to Sequential IPD: Reverse Engineering
+Patients could experience more than one event in a row, this part aims to reverse the sequential event table from the type-specific IPD, which has the event number in terms of total number happens during 42 months, but here we will use reverse engineering to simulate the sequential event table for 36 months based on type-specific IPD and Key information of Numbers of the first events of each type and Numbers of patients with 0, 1, 2, 3+ events.
+
+### Step1: Estimate constant hazards from Type-specific IPD
+```{r step1: Estimate constant hazards}
+# Function to calculate event rates and optionally plot
+get_h <- function(data, plot = TRUE, col_vec = c("red", "blue")) {
+  tmp <- aggregate(cbind(time, status) ~ treat, data = data, sum)
+  tmp$rate <- tmp$status / tmp$time
+  tseq <- seq(0, 42, by = 0.05)
+  
+  if (plot) {
+    sf <- survfit(Surv(time, status) ~ treat, data = data)
+    plot(sf, fun = "event", col = col_vec, lwd = 1.2,
+         xlab = "Time (months)", ylab = "Cumulative Incidence",
+          xaxt = "n",)
+    axis(1, at = seq(0, 42, by = 6))
+    # Add grid lines for better readability
+grid(nx = NULL, ny = NULL, col = "gray90", lty = "dotted")
+
+# Add legend
+legend("bottomright",
+       legend = c("Placebo", "Evolocumab"),
+       col = c("red", "blue"),
+       lwd = 1.2,
+       bty = "n")  # remove box around legend
+    
+    for (i in 1:2) {
+      lines(tseq, 1 - exp(-tmp$rate[i] * tseq), type = "l", col = col_vec[i], lty = 3, lwd = 1.2)
+    }
+  }
+  
+  return(tmp)
+}
+
+# Store all tmp tables
+h1_stat <- get_h(revas)
+h2_stat <- get_h(mi)
+h3_stat <- get_h(hosp)
+h4_stat <- get_h(stroke)
+h5_stat <- get_h(cvd)
+```
+
+### Step2: Generate Multi-state Process
+```{r censoring distribution}
+# Find a proper censoring distribution
+tseq <- seq(0, 42, by = 0.05)
+sfcens <- survfit(Surv(time, status == 0) ~ treat, data = df_ipd)
+
+# Plot Kaplan-Meier estimate of censoring
+plot(sfcens, lwd = 1.7,
+     xlab = "Time (months)",
+     ylab = "Probability of being uncensored")
+
+# Add proposed uniform censoring survival function
+censseq <- punif(tseq, 17, 36, lower.tail = FALSE)
+lines(tseq, censseq, type = "l", col = "blue", lty = 3, lwd = 1.7)
+
+# Optional: Add legend
+legend("topright", legend = c("IPD", "Uniform(17, 36)"),
+       col = c("black", "blue"), lty = c(1, 3), lwd = 1.7)
+
+```
+
+```{r censoring distribution pro}
+# Kaplan-Meier estimate of censoring
+sfcens <- survfit(Surv(time, status == 0) ~ treat, data = df_ipd)
+
+# Base KM plot
+p <- ggsurvplot(
+  sfcens,
+  data = df_ipd,
+  conf.int = FALSE,
+  censor = FALSE,
+  risk.table = FALSE,
+  palette = c("black", "darkgray"),
+  linetype = "solid",
+  size = 1.2,
+  xlab = "Time (months)",
+  ylab = "Probability of Remaining Uncensored",
+  ggtheme = theme_minimal(base_size = 13)
+)
+
+# Custom uniform censoring line
+tseq <- seq(0, 42, by = 0.05)
+censseq <- punif(tseq, min = 17, max = 36, lower.tail = FALSE)
+uniform_df <- data.frame(time = tseq, surv = censseq)
+
+# Add line using ggplot2
+p$plot <- p$plot +
+  geom_line(data = uniform_df, aes(x = time, y = surv),
+            color = "blue", linetype = "dashed", size = 1.2) +
+  scale_y_continuous(limits = c(0, 1), expand = c(0, 0.01)) +
+  labs(title = "Censoring Distribution",
+       subtitle = "Kaplan-Meier estimate vs. Uniform(17, 36)") +
+  theme(
+    legend.position = "top",
+    plot.title = element_text(face = "bold"),
+    plot.subtitle = element_text(size = 11)
+  ) +
+  annotate("text", x = 38, y = 0.4, label = "Uniform(17, 36)",
+           color = "blue", size = 4, hjust = 1)
+
+# Print plot
+print(p)
+
+```
+
+
+```{r step2: simulation function}
+simulate_events <- function(c1, c2, c3, c4, c5, h1, h2, h3, h4, h5, n = 13784, seed = 2025) {
+  set.seed(seed)
+  
+  res <- matrix(NA, n, 11)
+  colnames(res) <- c("id", paste0(rep(c("time", "type"), 5), rep(1:5, each = 2)))
+  res[, 1] <- 1:n
+  
+  # First event
+  t1 <- rexp(n, rate = c1[1] * h1)
+  t2 <- rexp(n, rate = c2[1] * h2)
+  t3 <- rexp(n, rate = c3[1] * h3)
+  t4 <- rexp(n, rate = c4[1] * h4)
+  t5 <- rexp(n, rate = c5[1] * h5)
+  
+  tnext <- pmin(t1, t2, t3, t4, t5)
+  dnext <- ifelse(tnext == t1, 1,
+           ifelse(tnext == t2, 2,
+           ifelse(tnext == t3, 3,
+           ifelse(tnext == t4, 4, 5))))
+  
+  res[, 2] <- tnext
+  res[, 3] <- dnext
+  
+  # who experienced cv death they will be filtered out
+  whnext <- which(dnext < 5)
+  
+  for (event in 2:5) {
+    if (length(whnext) == 0) break
+    
+    t1 <- rexp(length(whnext), rate = c1[2] * h1)
+    t2 <- rexp(length(whnext), rate = c2[2] * h2)
+    t3 <- rexp(length(whnext), rate = c3[2] * h3)
+    t4 <- rexp(length(whnext), rate = c4[2] * h4)
+    t5 <- rexp(length(whnext), rate = c5[2] * h5)
+    
+    tnext <- pmin(t1, t2, t3, t4, t5)
+    dnext <- ifelse(tnext == t1, 1,
+             ifelse(tnext == t2, 2,
+             ifelse(tnext == t3, 3,
+             ifelse(tnext == t4, 4, 5))))
+    
+    time_col <- 2 * (event - 1) + 2
+    type_col <- 2 * (event - 1) + 3
+    prev_time_col <- time_col - 2
+    
+    res[whnext, time_col] <- res[whnext, prev_time_col] + tnext
+    res[whnext, type_col] <- dnext
+    
+    whnext <- whnext[dnext < 5]
+  }
+  
+  # Store full simulated data (uncensored)
+  sim <- as.data.frame(res)
+  
+  # Apply censoring
+  ctime <- runif(n, 17, 36)
+  res_c <- cbind(res, ctime)
+  df <- as.data.frame(res_c)
+  
+  for (i in 1:5) {
+    time_col <- paste0("time", i)
+    type_col <- paste0("type", i)
+    
+    df[[type_col]] <- ifelse(df[[time_col]] < df$ctime, df[[type_col]], 0)
+    df[[time_col]] <- pmin(df[[time_col]], df$ctime)
+    
+    if (i < 5) {
+      censored_rows <- which(df[[type_col]] == 0)
+      next_time_cols <- unlist(lapply((i + 1):5, function(j) c(paste0("time", j), paste0("type", j))))
+      df[censored_rows, next_time_cols] <- NA
+    }
+  }
+  
+  # Final output
+  sim_c <- df
+  
+  return(list(sim = sim, sim_c = sim_c))
+}
+```
+
+```{r initial simulation result for PLACEBO}
+# Placebo
+# initial values for compensation parameters
+c1_revas <- c(0.412, 13.45709)
+c2_mi <- c(0.636, 7.1875)
+c3_hosp <- c(0.835, 8.801318)
+c4_stroke <- c(0.812, 3.919355)
+c5_cvd <- c(0.598,9.816327)
+# hazard rate
+h1 <- h1_stat$rate[1]
+h2 <- h2_stat$rate[1]
+h3 <- h3_stat$rate[1]
+h4 <- h4_stat$rate[1]
+h5 <- h5_stat$rate[1]
+results <- simulate_events(c1_revas, c2_mi, c3_hosp, c4_stroke, c5_cvd, h1, h2, h3, h4, h5, n = 13780)
+# Access outputs
+sim_pla <- results$sim     # Uncensored
+sim_c_pla <- results$sim_c # Censored
+```
+
+```{r intial simulation result for EVOLOCUMAB}
+# Evolocumab
+# initial values for compensation parameters
+c1_revas <- c(0.4552, 14.94051)
+c2_mi <- c(0.677, 7.100719)
+c3_hosp <- c(0.9150, 12.18284)
+c4_stroke <- c(0.8280, 3.217391)
+c5_cvd <- c(0.6275, 11.98333)
+# hazard rate
+h1 <- h1_stat$rate[2]
+h2 <- h2_stat$rate[2]
+h3 <- h3_stat$rate[2]
+h4 <- h4_stat$rate[2]
+h5 <- h5_stat$rate[2]
+results <- simulate_events(c1_revas, c2_mi, c3_hosp, c4_stroke, c5_cvd, h1, h2, h3, h4, h5)
+# Access outputs
+sim_evo <- results$sim     # Uncensored
+sim_c_evo <- results$sim_c # Censored
+```
+
+### Step3: Tuning Compensation parameters
+```{r step3: Tuning Compensation parameters}
+# LOSS FUNCTION
+evaluate_loss <- function(params, h1, h2, h3, h4, h5, n = 13784, seed = 2025) {
+  c1 <- params[1:2]; c2 <- params[3:4]; c3 <- params[5:6]
+  c4 <- params[7:8]; c5 <- params[9:10]
+  
+  sim_result <- simulate_events(c1, c2, c3, c4, c5, h1, h2, h3, h4, h5, n, seed)
+  sim_c <- sim_result$sim_c
+
+  # First event counts
+  first_event_counts <- table(factor(sim_c$type1, levels = 1:5))
+  
+  # Event sequences (1, 2, ≥3)
+  event_counts <- apply(sim_c[, paste0("type", 1:5)], 1, function(x) sum(x > 0, na.rm = TRUE))
+  s_1 <- sum(event_counts == 1)
+  s_2 <- sum(event_counts == 2)
+  s_3 <- sum(event_counts >= 3)
+  
+  # Total event counts across all time points
+  all_types <- unlist(sim_c[, paste0("type", 1:5)])
+  total_event_counts <- table(factor(all_types[all_types > 0], levels = 1:5))
+  names(total_event_counts) <- names(targets$total_event_counts)
+  
+  # Loss components
+  event_loss <- sum(abs(as.numeric(first_event_counts) - unlist(targets$first_event_counts)))
+  sequence_loss <- sum(abs(c(s_1, s_2, s_3) - unlist(targets$sequence_counts)))
+  total_event_loss <- sum(abs(as.numeric(total_event_counts) - unlist(targets$total_event_counts)))
+  
+  # Combine
+  total_loss <- event_loss + sequence_loss + total_event_loss
+  return(total_loss)
+}
+```
+
+```{r step3: Best parameters for PLACEBO}
+# hazard rate
+h1 <- h1_stat$rate[1]
+h2 <- h2_stat$rate[1]
+h3 <- h3_stat$rate[1]
+h4 <- h4_stat$rate[1]
+h5 <- h5_stat$rate[1]
+# TARGETS
+targets <- list(
+  first_event_counts = c(revasc = 394, mi = 423, hosp = 160, stroke = 226, cvd = 142),
+  sequence_counts = c(only_1 = 806, only_2 = 543, at_least_3 = 214),
+  total_event_counts = c(revasc = 965, mi = 639, hosp = 239, stroke = 262, cvd = 240)
+
+)
+
+# INITIAL VALUES (you can load from your current estimates)
+init_params <- c(
+  0.412, 13.45709,  # c1 (revasc)
+  0.636, 7.1875, # c2 (mi)
+  0.835, 8.801318,  # c3 (hosp)
+  0.812, 3.919355, # c4 (stroke)
+  0.598, 9.816327   # c5 (cvd)
+)
+
+# OPTIMIZATION: Nelder-Mead (gradient-free and simple)
+optimized <- optim(
+  par = init_params,
+  fn = evaluate_loss,
+  method = "Nelder-Mead",  # Try "L-BFGS-B" if you want to enforce bounds
+  h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5,
+  control = list(maxit = 100)
+)
+
+# BOUNDS (if using L-BFGS-B or other bounded methods)
+lower_bounds <- rep(0.0001, 10)
+upper_bounds <- rep(100, 10)
+# View optimized parameters
+optimized_params <- matrix(optimized$par, ncol = 2, byrow = TRUE)
+rownames(optimized_params) <- c("c1_revasc", "c2_mi", "c3_hosp", "c4_stroke", "c5_cvd")
+colnames(optimized_params) <- c("first_event", "subsequent")
+print(optimized_params)
+```
+
+```{r opt simulation stat for PLACEBO}
+# Convert rows of optimized_params into separate c1 to c5 vectors
+c_list_opt_pla <- split(optimized_params, row(optimized_params))
+names(c_list_opt_pla) <- c("c1", "c2", "c3", "c4", "c5")
+sim_result <- do.call(simulate_events, c(c_list_opt_pla, list(h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5),n=13780))
+sim_c_pla_opt <- sim_result$sim_c
+sim_pla_opt <- sim_result$sim
+
+# Total number of each type of event (across all 5 slots)
+all_types <- unlist(sim_c_pla_opt[, paste0("type", 1:5)])
+event_counts <- table(factor(all_types[all_types > 0], levels = 1:5))
+names(event_counts) <- c("revasc", "mi", "hosp", "stroke", "cvd")
+print(event_counts)
+
+# First event counts: only from type1 column, ignoring zeros or censored (0)
+first_event_counts <- table(factor(sim_c_pla_opt$type1[sim_c_pla_opt$type1 > 0], levels = 1:5))
+names(first_event_counts) <- c("revasc", "mi", "hosp", "stroke", "cvd")
+print(first_event_counts)
+
+# Sequence pattern counts
+trajectory_counts <- rowSums(sim_c_pla_opt[, paste0("type", 1:5)] > 0, na.rm = TRUE)
+s_1 <- sum(trajectory_counts == 1)
+s_2 <- sum(trajectory_counts == 2)
+s_3 <- sum(trajectory_counts >= 3)
+cat("s_1:", s_1, "\ns_2:", s_2, "\ns_3:", s_3, "\n")
+
+# Use flattened optimized params directly
+total_loss <- evaluate_loss(as.vector(t(optimized_params)), h1, h2, h3, h4, h5)
+cat("Total loss:", total_loss, "\n")
+```
+
+
+```{r step3: Best parameters for EVOLOCUMAB}
+# hazard rate
+h1 <- h1_stat$rate[2]
+h2 <- h2_stat$rate[2]
+h3 <- h3_stat$rate[2]
+h4 <- h4_stat$rate[2]
+h5 <- h5_stat$rate[2]
+# TARGETS
+targets <- list(
+  first_event_counts = c(revasc = 349, mi = 329, hosp = 169, stroke = 184, cvd = 152),
+  sequence_counts = c(only_1 = 768, only_2 = 417, at_least_3 = 159),
+  total_event_counts = c(revasc = 759, mi = 468, hosp = 236, stroke = 207, cvd = 251)
+
+)
+
+# INITIAL VALUES (you can load from your current estimates)
+init_params <- c(
+  0.4552, 14.94051,  # c1 (revasc)
+  0.6770,  7.100719, # c2 (mi)
+  0.9150, 12.18284,  # c3 (hosp)
+  0.8280,  3.217391, # c4 (stroke)
+  0.6275, 11.98333   # c5 (cvd)
+)
+
+# OPTIMIZATION: Nelder-Mead (gradient-free and simple)
+optimized <- optim(
+  par = init_params,
+  fn = evaluate_loss,
+  method = "Nelder-Mead",  # Try "L-BFGS-B" if you want to enforce bounds
+  h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5,
+  control = list(maxit = 100)
+)
+
+# BOUNDS (if using L-BFGS-B or other bounded methods)
+lower_bounds <- rep(0.0001, 10)
+upper_bounds <- rep(100, 10)
+# View optimized parameters
+optimized_params <- matrix(optimized$par, ncol = 2, byrow = TRUE)
+rownames(optimized_params) <- c("c1_revasc", "c2_mi", "c3_hosp", "c4_stroke", "c5_cvd")
+colnames(optimized_params) <- c("first_event", "subsequent")
+print(optimized_params)
+```
+
+```{r opt simulation stat for EVOLOCUMAB}
+# Convert rows of optimized_params into separate c1 to c5 vectors
+c_list <- split(optimized_params, row(optimized_params))
+names(c_list) <- c("c1", "c2", "c3", "c4", "c5")
+sim_result <- do.call(simulate_events, c(c_list, list(h1 = h1, h2 = h2, h3 = h3, h4 = h4, h5 = h5)))
+sim_c_evo_opt <- sim_result$sim_c
+sim_evo_opt <- sim_result$sim
+
+# Total number of each type of event (across all 5 slots)
+all_types <- unlist(sim_c_evo_opt[, paste0("type", 1:5)])
+event_counts <- table(factor(all_types[all_types > 0], levels = 1:5))
+names(event_counts) <- c("revasc", "mi", "hosp", "stroke", "cvd")
+print(event_counts)
+
+# First event counts: only from type1 column, ignoring zeros or censored (0)
+first_event_counts <- table(factor(sim_c_evo_opt$type1[sim_c_evo_opt$type1 > 0], levels = 1:5))
+names(first_event_counts) <- c("revasc", "mi", "hosp", "stroke", "cvd")
+print(first_event_counts)
+
+# Sequence pattern counts
+trajectory_counts <- rowSums(sim_c_evo_opt[, paste0("type", 1:5)] > 0, na.rm = TRUE)
+s_1 <- sum(trajectory_counts == 1)
+s_2 <- sum(trajectory_counts == 2)
+s_3 <- sum(trajectory_counts >= 3)
+cat("s_1:", s_1, "\ns_2:", s_2, "\ns_3:", s_3, "\n")
+
+# Use flattened optimized params directly
+total_loss <- evaluate_loss(as.vector(t(optimized_params)), h1, h2, h3, h4, h5)
+cat("Total loss:", total_loss, "\n")
+```
+
+### Step4: Quality Check
+```{r step4: Quality Check}
+sim_c_pla_opt$arm <- 0
+sim_c_evo_opt$arm <- 1
+df_c <- rbind(sim_c_pla_opt,sim_c_evo_opt)
+sf_composite <- survfit(Surv(time1, type1>0) ~ arm, data = df_c)
+plot(sf_composite, fun = "event", col = c("red", "blue"), lwd = 1,
+     xlab = "Time (months)", ylab = "Cumulative Incidence")
+axis(1, at = c(0,6,12,18,24,30,36,42))
+
+# Improved cumulative incidence plot
+plot(sf_composite, fun = "event",
+     col = c("red", "blue"), lwd = 2,
+     xlab = "Time (Months)",
+     ylab = "Cumulative Incidence",
+     xaxt = "n")  # suppress default x-axis
+
+# Custom x-axis with labeled ticks every 6 months
+axis(1, at = seq(0, 42, by = 6), labels = seq(0, 42, by = 6))
+
+# Add grid lines for better readability
+grid(nx = NULL, ny = NULL, col = "gray90", lty = "dotted")
+
+# Add legend
+legend("bottomright",
+       legend = c("Placebo", "Evolocumab"),
+       col = c("red", "blue"),
+       lwd = 2,
+       bty = "n")  # remove box around legend
+
+
+survdiff(Surv(time1, type1>0) ~ arm, data = df_c)
+
+coxph(Surv(time1, type1>0) ~ arm, data = df_c)
+
+# Fit the Cox model
+model <- coxph(Surv(time1, type1 > 0) ~ arm, data = df_c)
+
+# View the summary (includes HR and p-values)
+summary(model)
+
+# Get 95% confidence interval for the coefficients (on log-HR scale)
+confint(model)
+
+# OR: Get HR and 95% CI together
+exp(cbind(HR = coef(model), confint(model)))
+```
+
+# QALY weighted RMST
+We are only interested in the uncensored data with the time period until 36 months. And add the starting state event free, coded as 1, and add 1 to the event index make them state index.
+## Data Preparation
+```{r from event to state}
+sim_pla_opt$arm <- 0
+sim_evo_opt$arm <- 1
+df <- rbind(sim_pla_opt,sim_evo_opt)
+
+truncate_time <- 36
+
+truncate_row <- function(times, types, truncate_time) {
+  for (i in seq_along(times)) {
+    if (!is.na(times[i]) && times[i] > truncate_time) {
+      times[i] <- truncate_time
+      types[i] <- -1
+      if (i < length(times)) {
+        times[(i+1):length(times)] <- NA
+        types[(i+1):length(types)] <- NA
+      }
+      break
+    }
+  }
+  return(list(times = times, types = types))
+}
+
+# Apply the function row-wise
+for (i in 1:nrow(df)) {
+  times <- as.numeric(df[i, grep("time", names(df))])
+  types <- as.numeric(df[i, grep("type", names(df))])
+  
+  truncated <- truncate_row(times, types, truncate_time)
+  
+  df[i, grep("time", names(df))] <- truncated$times
+  df[i, grep("type", names(df))] <- truncated$types
+}
+
+# Update types to states by adding 1 (but leave NAs untouched)
+for (col in grep("^type", names(df), value = TRUE)) {
+  df[[col]] <- ifelse(is.na(df[[col]]), NA, df[[col]] + 1)
+}
+
+
+df$survstat <- 0
+df <- df %>%
+  mutate(survstat = as.integer(rowSums(across(
+    starts_with("type"), ~ . == 6
+  ), na.rm = TRUE) > 0))
+
+write_xlsx(df, path = "df_opt.xlsx")
+```
+
+```{r}
+truncate_and_update_states <- function(df, truncate_time = 36) {
+  
+  # Helper function to truncate times and types per row
+  truncate_row <- function(times, types, truncate_time) {
+    for (i in seq_along(times)) {
+      if (!is.na(times[i]) && times[i] > truncate_time) {
+        times[i] <- truncate_time
+        types[i] <- -1
+        if (i < length(times)) {
+          times[(i+1):length(times)] <- NA
+          types[(i+1):length(types)] <- NA
+        }
+        break
+      }
+    }
+    return(list(times = times, types = types))
+  }
+  
+  # Get time and type column indices
+  time_cols <- grep("^time", names(df))
+  type_cols <- grep("^type", names(df))
+  
+  # Apply truncation row-wise
+  for (i in 1:nrow(df)) {
+    times <- as.numeric(df[i, time_cols])
+    types <- as.numeric(df[i, type_cols])
+    
+    truncated <- truncate_row(times, types, truncate_time)
+    
+    df[i, time_cols] <- truncated$times
+    df[i, type_cols] <- truncated$types
+  }
+  
+  # Convert types to states (add 1), keeping NAs untouched
+  for (col in type_cols) {
+    df[[col]] <- ifelse(is.na(df[[col]]), NA, df[[col]] + 1)
+  }
+  
+  return(df)
+}
+
+```
+
+
+```{r wide to long format function}
+df <- read_xlsx("df_opt.xlsx")
+wide2long <- function(subj) {
+  # Extract times and types
+  times <- as.numeric(subj[paste0("time", 1:5)])
+  types <- as.numeric(subj[paste0("type", 1:5)])
+  ctime <- as.numeric(subj[["ctime"]])
+  id <- subj[["id"]]
+  
+  # Only keep observed events (non-NA times and types)
+  observed <- !is.na(times) & !is.na(types)
+  times <- times[observed]
+  types <- types[observed]
+  
+  # Return empty tibble if no valid events
+  if (length(times) == 0 || is.na(id) || is.na(ctime)) {
+    return(tibble())
+  }
+  
+  # Initialize output list
+  result <- list()
+  from_state <- 1
+  start_time <- 0
+  
+  # Process each transition
+  for (i in seq_along(times)) {
+    stop_time <- times[i]
+    to_state <- types[i]
+    
+    for (t in 1:6) {
+      status <- as.integer(t == to_state)
+      result[[length(result) + 1]] <- tibble(
+        id = id,
+        start = start_time,
+        stop = stop_time,
+        status = status,
+        from = from_state,
+        to = t,
+        transition = paste0(from_state, "→", t),
+        time = stop_time
+      )
+    }
+    
+    # Update state and time
+    from_state <- to_state
+    start_time <- stop_time
+  }
+  
+  # Final censored interval (if appropriate)
+  if (!is.na(from_state) && !is.na(start_time) && !is.na(ctime) &&
+      from_state != 6 && start_time < ctime) {
+    for (t in 1:6) {
+      result[[length(result) + 1]] <- tibble(
+        id = id,
+        start = start_time,
+        stop = ctime,
+        status = 0,
+        from = from_state,
+        to = t,
+        transition = paste0(from_state, "→", t),
+        time = ctime
+      )
+    }
+  }
+  
+  # Return combined tibble
+  bind_rows(result)
+}
+
+
+df$ctime <- 36
+```
+
+This step take long time, so please don't run again, just use the saved file
+```{r apply wide2long}
+# Apply function row-wise
+evo_long <-  df[df$arm == 1,] %>%
+  pmap_dfr(function(...) wide2long(list(...)))
+write_xlsx(evo_long, path = "evo_long.xlsx")
+
+pla_long <-  df[df$arm == 0,] %>%
+  pmap_dfr(function(...) wide2long(list(...)))
+write_xlsx(pla_long, path = "pla_long.xlsx")
+```
+
+
+
+## Multi-state Model: Markov Principle
+```{r transMat}
+evo_long <- read_excel("evo_long.xlsx")
+pla_long <- read_excel("pla_long.xlsx")
+# Make this into "msdata" format for use in mstate
+tmat <- transMat(list(
+  c(2, 3, 4, 5, 6),
+  c(3, 4, 5, 6),
+  c(2, 4, 5, 6),
+  c(2, 3, 5, 6),
+  c(2, 3, 4, 6),
+  c()),
+  names = c("Event-free", "Revasc", "MI", "Hosp", "Stroke", "Death"))
+tmat
+
+ttmat <- mstate:::to.trans2(tmat)
+
+# Evolo
+evo_long <- left_join(evo_long, ttmat)
+evo_long$trans <- evo_long$transno
+attr(evo_long, "trans") <- tmat
+class(evo_long) <- c("msdata", "data.frame")
+# Check counts
+events(evo_long)
+
+# Placebo
+pla_long <- left_join(pla_long, ttmat)
+pla_long$trans <- pla_long$transno
+attr(pla_long, "trans") <- tmat
+class(pla_long) <- c("msdata", "data.frame")
+# Check counts
+events(pla_long)
+```
+
+### Transition hazard
+```{r Transition hazard plot: Placebo}
+# Estimate transition hazards
+cox_plalong <- coxph(Surv(start, stop, status) ~ strata(trans), data = pla_long)
+msf_pla <- msfit(cox_plalong, trans = tmat)
+plot(msf_pla, use.ggplot = TRUE,ylim = c(0,1.5))
+```
+
+```{r Transition probability plot: Placebo}
+# Estimate transition probabilities
+pt_pla <- probtrans(msf_pla, predt = 0, variance = FALSE)
+# plot(pt_evo, use.ggplot = TRUE)
+plot(pt_pla, ord = c(6, 5, 4, 3, 2, 1), use.ggplot = TRUE, ylim = c(0, 0.2))
+
+# ELoS
+state_length_pla <- ELOS(pt_pla, tau = 36)
+state_length_pla
+```
+
+
+```{r Transition hazard plot: Evolo}
+# Estimate transition hazards
+cox_evolong <- coxph(Surv(start, stop, status) ~ strata(trans), data = evo_long)
+msf_evo <- msfit(cox_evolong, trans = tmat)
+plot(msf_evo, use.ggplot = TRUE,ylim = c(0,1.5))
+```
+
+
+```{r Transition probability plot : Evolo}
+# Estimate transition probabilities
+pt_evo <- probtrans(msf_evo, predt = 0, variance = FALSE)
+# plot(pt_evo, use.ggplot = TRUE)
+plot(pt_evo, ord = c(6, 5, 4, 3, 2, 1), use.ggplot = TRUE, ylim = c(0, 0.2))
+
+# ELoS
+state_length_evo <- ELOS(pt_evo, tau = 36)
+state_length_evo
+```
+
+
+```{r Integrate plot of two groups}
+p1 <- plot(msf_pla, use.ggplot = TRUE, ylim = c(0,1.5), lwd = 0.7)
+p2 <- plot(msf_evo, use.ggplot = TRUE, ylim = c(0,1.5), lwd = 0.7)
+
+
+# Add plot titles
+p1 <- p1 + ggtitle("Placebo")
+p2 <- p2 + ggtitle("Evolocumab")
+
+# Combine with shared legend
+(p2 | p1) + 
+  plot_layout(guides = "collect") & 
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5, size = 14, face = "bold"))
+```
+
+```{r mirror plot}
+vis.mirror.pt(
+  x = list(pt_evo, pt_pla),
+  titles = c("Evolocumab", "Placebo"),
+  ord = c(6, 5, 4, 3, 2, 1),
+  col = c(
+  "Event-free" = "#FFD700",  # Bright Yellow
+  "Revasc"     = "#66C245",  # Light Green
+  "MI"         = "#1DB39B",  # Teal Green
+  "Hosp"       = "#2C6CA2",  # Blue
+  "Stroke"     = "#363E7D",  # Dark Navy Blue
+  "Death"      = "#3F005A"   # Deep Purple
+))
+```
+### Calculate QALY RMST
+```{r}
+w <- c(1,0.9,0.88,0.69,0.15,0) 
+w_RMST_evo <- sum(w * state_length_evo[1,])
+w_RMST_pla <- sum(w * state_length_pla[1,])
+(w_RMST_evo- w_RMST_pla)*30
+```
+## Naive calculation 
+### Principle 1: Markov Principle
+```{r}
+df_P1 <- df %>%
+  rowwise() %>%
+  mutate(
+    p1 = time1 * w[1],
+    p2 = ifelse(is.na(time2), 0, w[type1] * (time2 - time1)),
+    p3 = ifelse(is.na(time3), 0, w[type2] * (time3 - time2)),
+    p4 = ifelse(is.na(time4), 0, w[type3] * (time4 - time3)),
+    p5 = ifelse(is.na(time5), 0, w[type4] * (time5 - time4)),
+    p6 = ifelse(type5 == 0 | is.na(time5), 0, w[type5] * (36 - time5)),
+    w_st = p1 + p2 + p3 + p4 + p5 + p6
+  ) %>%
+  ungroup()
+
+
+rmst_evo_P1 <- mean(df_P1$w_st[which(df_P1$arm == 1)], na.rm = TRUE)
+sd_evo <- sd(df_P1$w_st[which(df_P1$arm == 1)], na.rm = TRUE)
+rmst_pla_P1 <- mean(df_P1$w_st[which(df_P1$arm == 0)], na.rm = TRUE) 
+sd_pla <- sd(df_P1$w_st[which(df_P1$arm == 0)], na.rm = TRUE)
+diff_rmst_P1 <- (rmst_evo_P1-rmst_pla_P1)    # months
+
+# Convert to days
+diff_rmst_P1_days <- diff_rmst_P1 * 30
+
+# Output
+cat("Evolo:", rmst_evo_P1, "months |", "sd.:", sd_evo,"\n")
+cat("Placebo:", rmst_pla_P1,  "months |", "sd.:", sd_pla,"\n")
+cat("Difference:", round(diff_rmst_P1_days, 7), "days\n")
+```
+### Principle 2: Worst-state Update
+```{r}
+df_P2 <- df %>%
+  rowwise() %>%
+  mutate(
+    # Segment 1: from 0 to time1 → no events yet
+    p1 = time1 * w[1],
+    # Segment 2: from time1 to time2 → worst of type1
+    worst1 = max(1, type1, na.rm = TRUE),
+    p2 = ifelse(is.na(time2), 0, w[worst1] * (time2 - time1)),
+    # Segment 3: from time2 to time3 → worst of type1, type2
+    worst2 = max(c(1, type1, type2), na.rm = TRUE),
+    p3 = ifelse(is.na(time3), 0, w[worst2] * (time3 - time2)),
+    # Segment 4: from time3 to time4 → worst of type1 to type3
+    worst3 = max(c(1, type1, type2, type3), na.rm = TRUE),
+    p4 = ifelse(is.na(time4), 0, w[worst3] * (time4 - time3)),
+    # Segment 5: from time4 to time5 → worst of type1 to type4
+    worst4 = max(c(1, type1, type2, type3, type4), na.rm = TRUE),
+    p5 = ifelse(is.na(time5), 0, w[worst4] * (time5 - time4)),
+    # Segment 6: from time5 to 36 months → worst of type1 to type5
+    worst5 = max(c(1, type1, type2, type3, type4, type5), na.rm = TRUE),
+    p6 = ifelse(is.na(time5) | type5 == 0, 0, w[worst5] * (36 - time5)),
+
+    # Total weighted QALY
+    w_st = p1 + p2 + p3 + p4 + p5 + p6
+  ) %>%
+  ungroup()
+
+rmst_evo_P2 <- mean(df_P2$w_st[which(df_P2$arm == 1)], na.rm = TRUE)
+sd_evo <- sd(df_P2$w_st[which(df_P2$arm == 1)], na.rm = TRUE)
+rmst_pla_P2 <- mean(df_P2$w_st[which(df_P2$arm == 0)], na.rm = TRUE) 
+sd_pla <- sd(df_P2$w_st[which(df_P2$arm == 0)], na.rm = TRUE)
+diff_rmst_P2 <- rmst_evo_P2-rmst_pla_P2  # months
+
+# Convert to days
+diff_rmst_P2_days <- diff_rmst_P2* 30
+
+# Output
+cat("Evolo:", rmst_evo_P2, "months |", "sd.:", sd_evo,"\n")
+cat("Placebo:", rmst_pla_P2,  "months |", "sd.:", sd_pla,"\n")
+cat("Difference:", round(diff_rmst_P2_days, 7), "days\n")
+```
+###  Principle 3: Cumulative QALY Product
+```{r}
+df_P3 <- df %>%
+  rowwise() %>%
+  mutate(
+    p1 = time1 * w[1],
+    
+    q2 = if (!is.na(type1) && type1 > 0) w[1] * w[type1] else 0,
+    p2 = ifelse(is.na(time2), 0, q2 * (time2 - time1)),
+    
+    q3 = if (!is.na(type2) && type2 > 0) q2 * w[type2] else 0,
+    p3 = ifelse(is.na(time3), 0, q3 * (time3 - time2)),
+    
+    q4 = if (!is.na(type3) && type3 > 0) q3 * w[type3] else 0,
+    p4 = ifelse(is.na(time4), 0, q4 * (time4 - time3)),
+    
+    q5 = if (!is.na(type4) && type4 > 0) q4 * w[type4] else 0,
+    p5 = ifelse(is.na(time5), 0, q5 * (time5 - time4)),
+    
+    q6 = if (!is.na(type5) && type5 > 0) q5 * w[type5] else 0,
+    p6 = ifelse(is.na(time5) | type5 == 0, 0, q6 * (36 - time5)),
+
+    w_st = p1 + p2 + p3 + p4 + p5 + p6
+  ) %>%
+  ungroup()
+
+
+
+# Compute weighted RMSTs
+rmst_evo_P3 <- mean(df_P3$w_st[which(df_P3$arm == 1)], na.rm = TRUE)
+sd_evo <- sd(df_P3$w_st[which(df_P3$arm == 1)], na.rm = TRUE)
+rmst_pla_P3 <- mean(df_P3$w_st[which(df_P3$arm == 0)], na.rm = TRUE) 
+sd_pla <- sd(df_P3$w_st[which(df_P3$arm == 0)], na.rm = TRUE)
+diff_rmst_P3 <- rmst_evo_P3-rmst_pla_P3  # months
+
+# Convert to days
+diff_rmst_P3_days <- diff_rmst_P3* 30
+
+# Output
+cat("Evolo:", rmst_evo_P3, "months |", "sd.:", sd_evo,"\n")
+cat("Placebo:", rmst_pla_P3,  "months |", "sd.:", sd_pla,"\n")
+cat("Difference:", round(diff_rmst_P3_days, 7), "days\n")
+```
+###  Principle 4: RMST
+```{r}
+df_P4 <-df %>%
+  rowwise() %>%
+  mutate(
+    w_st = time1 * w[1]
+  ) %>%
+  ungroup()
+
+# Compute RMSTs
+rmst_evo_P4 <- mean(df_P4$w_st[which(df_P4$arm == 1)], na.rm = TRUE)
+sd_evo <- sd(df_P4$w_st[which(df_P4$arm == 1)], na.rm = TRUE)
+rmst_pla_P4 <- mean(df_P4$w_st[which(df_P4$arm == 0)], na.rm = TRUE) 
+sd_pla <- sd(df_P4$w_st[which(df_P4$arm == 0)], na.rm = TRUE)
+diff_rmst_P4 <- rmst_evo_P4-rmst_pla_P4  # months
+
+# Convert to days
+diff_rmst_P4_days <- diff_rmst_P4* 30
+
+# Output
+cat("Evolo:", rmst_evo_P4, "months |", "sd.:", sd_evo,"\n")
+cat("Placebo:", rmst_pla_P4,  "months |", "sd.:", sd_pla,"\n")
+cat("Difference:", round(diff_rmst_P4_days, 7), "days\n")
+```
+# Uncertainty measure: 95% confidence interval
+The uncertainty in the estimation arises primarily from the uncertainty in the assumed constant hazard. While there is also uncertainty related to the compensation parameters, we choose to ignore that for now.
+```{r perturb hazard rate with N(0,1)}
+perturb_h <- function(h, n_perturb = 100) {
+    h$selograte <- 1 / h$status
+    perturb_list <- vector("list", n_perturb)
+  
+  for (i in 1:n_perturb) {
+    perturbed <- h
+    perturbed$rate <- exp(log(perturbed$rate) + rnorm(nrow(perturbed)) * perturbed$selograte)
+    perturb_list[[i]] <- perturbed
+  }
+  
+  return(perturb_list)
+}
+
+h1_perturb_list <- perturb_h(h1_stat)
+h2_perturb_list <- perturb_h(h2_stat)
+h3_perturb_list <- perturb_h(h3_stat)
+h4_perturb_list <- perturb_h(h4_stat)
+h5_perturb_list <- perturb_h(h5_stat)
+```
+
+Optimize compensations using different perturbed hazard
+
+## 100 replicate for 4 principles
+```{r}
+# Preallocate matrix for storing results
+rmst_metrics <- matrix(NA, nrow = 100, ncol = 13)
+colnames(rmst_metrics) <- c(
+  "rmst_pla_P1", "rmst_evo_P1", "diff_rmst_P1",
+  "rmst_pla_P2", "rmst_evo_P2", "diff_rmst_P2",
+  "rmst_pla_P3", "rmst_evo_P3", "diff_rmst_P3",
+  "rmst_pla_P4", "rmst_evo_P4", "diff_rmst_P4",
+  "total_loss"
+)
+
+for (i in 1:100) {
+  # Get hazard rates
+  get_rates <- function(list, treat) lapply(list, function(x) x$rate[x$treat == treat])
+  h_pla <- get_rates(list(h1_perturb_list[[i]], h2_perturb_list[[i]], h3_perturb_list[[i]], h4_perturb_list[[i]], h5_perturb_list[[i]]), 0)
+  h_evo <- get_rates(list(h1_perturb_list[[i]], h2_perturb_list[[i]], h3_perturb_list[[i]], h4_perturb_list[[i]], h5_perturb_list[[i]]), 1)
+
+  # Optimize and simulate for placebo
+  opt_pla <- optim(
+    par = init_params, fn = evaluate_loss, method = "Nelder-Mead",
+    h1 = h_pla[[1]], h2 = h_pla[[2]], h3 = h_pla[[3]], h4 = h_pla[[4]], h5 = h_pla[[5]],
+    control = list(maxit = 100)
+  )
+  params_pla <- matrix(opt_pla$par, ncol = 2, byrow = TRUE)
+  c_list_pla <- split(params_pla, row(params_pla))
+  names(c_list_pla) <- paste0("c", 1:5)
+  sim_pla <- do.call(simulate_events, c(c_list_pla, list(h1 = h_pla[[1]], h2 = h_pla[[2]], h3 = h_pla[[3]], h4 = h_pla[[4]], h5 = h_pla[[5]]), n = 13780))
+  df_pla <- truncate_and_update_states(transform(sim_pla$sim, arm = 0))
+  loss_pla <- evaluate_loss(as.vector(t(params_pla)), h_pla[[1]], h_pla[[2]], h_pla[[3]], h_pla[[4]], h_pla[[5]])
+
+  # Optimize and simulate for evolocumab
+  opt_evo <- optim(
+    par = init_params, fn = evaluate_loss, method = "Nelder-Mead",
+    h1 = h_evo[[1]], h2 = h_evo[[2]], h3 = h_evo[[3]], h4 = h_evo[[4]], h5 = h_evo[[5]],
+    control = list(maxit = 100)
+  )
+  params_evo <- matrix(opt_evo$par, ncol = 2, byrow = TRUE)
+  c_list_evo <- split(params_evo, row(params_evo))
+  names(c_list_evo) <- paste0("c", 1:5)
+  sim_evo <- do.call(simulate_events, c(c_list_evo, list(h1 = h_evo[[1]], h2 = h_evo[[2]], h3 = h_evo[[3]], h4 = h_evo[[4]], h5 = h_evo[[5]])))
+  df_evo <- truncate_and_update_states(transform(sim_evo$sim, arm = 1))
+  loss_evo <- evaluate_loss(as.vector(t(params_evo)), h_evo[[1]], h_evo[[2]], h_evo[[3]], h_evo[[4]], h_evo[[5]])
+
+  # Merge datasets
+  df_perturb <- rbind(df_evo, df_pla)
+
+  # Principle 1: Markov
+  df_P1 <- df_perturb %>%
+    rowwise() %>%
+    mutate(
+      p1 = time1 * w[1],
+      p2 = ifelse(is.na(time2), 0, w[type1] * (time2 - time1)),
+      p3 = ifelse(is.na(time3), 0, w[type2] * (time3 - time2)),
+      p4 = ifelse(is.na(time4), 0, w[type3] * (time4 - time3)),
+      p5 = ifelse(is.na(time5), 0, w[type4] * (time5 - time4)),
+      p6 = ifelse(type5 == 0 | is.na(time5), 0, w[type5] * (36 - time5)),
+      w_st = p1 + p2 + p3 + p4 + p5 + p6
+    ) %>%
+    ungroup()
+  rmst_evo_P1 <- mean(df_P1$w_st[df_P1$arm == 1], na.rm = TRUE)
+  rmst_pla_P1 <- mean(df_P1$w_st[df_P1$arm == 0], na.rm = TRUE)
+  diff_rmst_P1 <- (rmst_evo_P1 - rmst_pla_P1) * 30
+
+  # Principle 2: Worst Update
+  df_P2 <- df_perturb %>%
+    rowwise() %>%
+    mutate(
+      p1 = time1 * w[1],
+      worst1 = max(1, type1, na.rm = TRUE),
+      p2 = ifelse(is.na(time2), 0, w[worst1] * (time2 - time1)),
+      worst2 = max(c(1, type1, type2), na.rm = TRUE),
+      p3 = ifelse(is.na(time3), 0, w[worst2] * (time3 - time2)),
+      worst3 = max(c(1, type1, type2, type3), na.rm = TRUE),
+      p4 = ifelse(is.na(time4), 0, w[worst3] * (time4 - time3)),
+      worst4 = max(c(1, type1, type2, type3, type4), na.rm = TRUE),
+      p5 = ifelse(is.na(time5), 0, w[worst4] * (time5 - time4)),
+      worst5 = max(c(1, type1, type2, type3, type4, type5), na.rm = TRUE),
+      p6 = ifelse(is.na(time5) | type5 == 0, 0, w[worst5] * (36 - time5)),
+      w_st = p1 + p2 + p3 + p4 + p5 + p6
+    ) %>%
+    ungroup()
+  rmst_evo_P2 <- mean(df_P2$w_st[df_P2$arm == 1], na.rm = TRUE)
+  rmst_pla_P2 <- mean(df_P2$w_st[df_P2$arm == 0], na.rm = TRUE)
+  diff_rmst_P2 <- (rmst_evo_P2 - rmst_pla_P2) * 30  # convert to days
+
+  # Principle 3: Cumulative Product
+  df_P3 <- df_perturb %>%
+    rowwise() %>%
+    mutate(
+      p1 = time1 * w[1],
+      q2 = if (!is.na(type1) && type1 > 0) w[1] * w[type1] else 0,
+      p2 = ifelse(is.na(time2), 0, q2 * (time2 - time1)),
+      q3 = if (!is.na(type2) && type2 > 0) q2 * w[type2] else 0,
+      p3 = ifelse(is.na(time3), 0, q3 * (time3 - time2)),
+      q4 = if (!is.na(type3) && type3 > 0) q3 * w[type3] else 0,
+      p4 = ifelse(is.na(time4), 0, q4 * (time4 - time3)),
+      q5 = if (!is.na(type4) && type4 > 0) q4 * w[type4] else 0,
+      p5 = ifelse(is.na(time5), 0, q5 * (time5 - time4)),
+      q6 = if (!is.na(type5) && type5 > 0) q5 * w[type5] else 0,
+      p6 = ifelse(is.na(time5) | type5 == 0, 0, q6 * (36 - time5)),
+      w_st = p1 + p2 + p3 + p4 + p5 + p6
+    ) %>%
+    ungroup()
+  rmst_evo_P3 <- mean(df_P3$w_st[df_P3$arm == 1], na.rm = TRUE)
+  rmst_pla_P3 <- mean(df_P3$w_st[df_P3$arm == 0], na.rm = TRUE)
+  diff_rmst_P3 <- (rmst_evo_P3 - rmst_pla_P3) * 30  # convert to days
+
+  # Principle 4: Naive RMST
+  df_P4 <- df_perturb %>%
+    rowwise() %>%
+    mutate(
+      w_st = time1 * w[1]
+    ) %>%
+    ungroup()
+  rmst_evo_P4 <- mean(df_P4$w_st[df_P4$arm == 1], na.rm = TRUE)
+  rmst_pla_P4 <- mean(df_P4$w_st[df_P4$arm == 0], na.rm = TRUE)
+  diff_rmst_P4 <- (rmst_evo_P4 - rmst_pla_P4) * 30
+  
+  # Total loss
+  total_loss <- loss_pla + loss_evo
+
+  # Store results
+  rmst_metrics[i, ] <- c(rmst_pla_P1, rmst_evo_P1, diff_rmst_P1,
+                         rmst_pla_P2, rmst_evo_P2, diff_rmst_P2,
+                         rmst_pla_P3, rmst_evo_P3, diff_rmst_P3,
+                         rmst_pla_P4, rmst_evo_P4, diff_rmst_P4,
+                         total_loss)
+}
+
+rmst_df <- as.data.frame(rmst_metrics)
+write_xlsx(rmst_df, path = "QRMST_rep100_P1234.xlsx")
+```
+
+## SE results
+```{r}
+rmst_df <- read_xls("QRMST_rep100_P1234.xlsx")
+se_P1 = c(
+    sd(rmst_df$rmst_pla_P1)/sqrt(100),
+    sd(rmst_df$rmst_evo_P1)/sqrt(100),
+    sd(rmst_df$diff_rmst_P1)/sqrt(100))
+
+se_P2 = c(
+    sd(rmst_df$rmst_pla_P2)/sqrt(100),
+    sd(rmst_df$rmst_evo_P2)/sqrt(100),
+    sd(rmst_df$diff_rmst_P2)/sqrt(100))
+
+se_P3 = c(
+    sd(rmst_df$rmst_pla_P3)/sqrt(100),
+    sd(rmst_df$rmst_evo_P3)/sqrt(100),
+    sd(rmst_df$diff_rmst_P3)/sqrt(100))
+  
+se_P4 = c(
+    sd(rmst_df$rmst_pla_P4)/sqrt(100),
+    sd(rmst_df$rmst_evo_P4)/sqrt(100),
+    sd(rmst_df$diff_rmst_P4)/sqrt(100))
+
+# ----- Function to compute 95% CI -----
+get_ci <- function(est, se_val) c(est - 1.96 * se_val, est + 1.96 * se_val)
+
+# ----- Compute 95% CIs -----
+ci_diff_P1 <- get_ci(diff_rmst_P1, se_P1[3])
+ci_diff_P2 <- get_ci(diff_rmst_P2, se_P2[3])
+ci_diff_P3 <- get_ci(diff_rmst_P3, se_P3[3])
+ci_diff_P4 <- get_ci(diff_rmst_P4, se_P4[3])
+
+# ----- Summary Data Frame -----
+qrms_diff_summary <- data.frame(
+  Principle = c("Markov", "Worst Update", "Cumulative Product", "RMST"),
+  Difference = round(c(diff_rmst_P1, diff_rmst_P2, diff_rmst_P3, diff_rmst_P4), 2),
+  CI_Difference = c(
+    sprintf("[%.2f, %.2f]", ci_diff_P1[1], ci_diff_P1[2]),
+    sprintf("[%.2f, %.2f]", ci_diff_P2[1], ci_diff_P2[2]),
+    sprintf("[%.2f, %.2f]", ci_diff_P3[1], ci_diff_P3[2]),
+    sprintf("[%.2f, %.2f]", ci_diff_P4[1], ci_diff_P4[2])
+  )
+)
+
+# ----- Output -----
+SE_DIFF <- c(se_P1[3],se_P2[3],se_P3[3],se_P4[3]) 
+print(qrms_diff_summary)
+```
+
+
+# Sensitivity Analysis
+```{r Markov Principle: stroke}
+# QALY weights for stroke subtypes
+w_stroke0 <- 0.15  # Ischaemic stroke (default)
+w_stroke1 <- 0.31  # Severe sequelae stroke
+w_stroke2 <- 0.71  # Moderate sequelae stroke
+w_stroke3 <- 0.80  # No sequelae stroke
+
+# Base utility vector
+base_w <- c(1, 0.9, 0.88, 0.69, NA, 0)
+
+# Function to compute RMST
+compute_rmst <- function(w_stroke_val, state_length_evo, state_length_pla) {
+  w <- base_w
+  w[5] <- w_stroke_val
+  evo <- sum(w * state_length_evo[1, ])
+  pla <- sum(w * state_length_pla[1, ])
+  diff <- (evo - pla) * 30  # difference in days
+  return(c(evo = evo, pla = pla, diff = diff))
+}
+
+# Prepare results dataframe
+results <- data.frame(
+  stroke_type = c(
+    "Ischaemic stroke (0.15)",
+    "Severe sequelae stroke (0.31)",
+    "Moderate sequelae stroke (0.71)",
+    "No sequelae stroke (0.80)"
+  ),
+  w_stroke = c(w_stroke0, w_stroke1, w_stroke2, w_stroke3)
+)
+
+results <- results %>%
+  rowwise() %>%
+  mutate(
+    vals = list(compute_rmst(w_stroke, state_length_evo, state_length_pla))
+  ) %>%
+  tidyr::unnest_wider(vals, names_sep = "_") %>%
+  rename(
+    evo = vals_evo,
+    pla = vals_pla,
+    diff = vals_diff
+  )
+
+
+# Add average stroke weight row
+w_stroke_avg <- mean(results$w_stroke)
+avg_vals <- compute_rmst(w_stroke_avg, state_length_evo, state_length_pla)
+results <- results %>%
+  add_row(
+    stroke_type = paste0("Average (", round(w_stroke_avg, 2), ")"),
+    w_stroke = w_stroke_avg,
+    evo = avg_vals["evo"],
+    pla = avg_vals["pla"],
+    diff = avg_vals["diff"]
+  )
+
+results$stroke_type <- factor(results$stroke_type, levels = results$stroke_type)
+
+# Reshape for
+df_long <- results %>%
+  select(stroke_type, evo, pla, diff) %>%
+  pivot_longer(cols = c("evo", "pla"), names_to = "Treatment", values_to = "RMST")
+
+# Bar plot 
+ggplot(df_long, aes(x = stroke_type, y = RMST, fill = Treatment)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.7), width = 0.6) +
+  scale_fill_manual(values = c(evo = "#1f78b4", pla = "#e31a1c")) +
+  coord_flip(ylim = c(34, 36)) +  # flip + zoom at once
+  geom_text(
+    data = results,
+    aes(
+      x = stroke_type,
+      y = pmax(evo, pla) + 0.3,
+      label = paste0("Δ = ", round(diff, 2), " days\n(",
+              round(diff/ 30, 2), "months)")
+    ),
+    inherit.aes = FALSE,
+    size = 3.5,
+    color = "black"
+  ) +
+  labs(x = NULL, y = "Q-RMST")+
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    legend.title = element_blank()
+  )
+```
+
+```{r}
+# Load necessary libraries
+library(dplyr)
+library(readxl)
+
+# Load your data
+df <- read_xlsx("df_opt.xlsx")
+df <- df %>%
+  mutate(
+    across(starts_with("type"), ~ ifelse(.x < 1 | .x > 5 | is.na(.x), NA, .x))
+  )
+
+# Define the ranges for sliders (boundary points)
+w2_vals <- c(0.87, 1)
+w3_vals <- c(0.61, 0.9)
+w4_vals <- c(0.69, 0.9)
+w5_vals <- c(0.15, 0.80)
+
+# Initialize results data frame
+results <- data.frame()
+
+# Loop over all boundary combinations
+for (w2_val in w2_vals) {
+  for (w3_val in w3_vals) {
+    for (w4_val in w4_vals) {
+      for (w5_val in w5_vals) {
+        w <- c(1, w2_val, w3_val, w4_val, w5_val, 0)
+        if (any(is.na(w))) next
+
+        # Principle 1
+        df_P1 <- df %>%
+          mutate(
+            p1 = time1 * w[1],
+            p2 = ifelse(is.na(time2), 0, w[type1] * (time2 - time1)),
+            p3 = ifelse(is.na(time3), 0, w[type2] * (time3 - time2)),
+            p4 = ifelse(is.na(time4), 0, w[type3] * (time4 - time3)),
+            p5 = ifelse(is.na(time5), 0, w[type4] * (time5 - time4)),
+            p6 = ifelse(type5 == 0 | is.na(time5), 0, w[type5] * (36 - time5)),
+            w_st = p1 + p2 + p3 + p4 + p5 + p6
+          )
+        mean_evo_P1 <- mean(df_P1$w_st[df_P1$arm == 1], na.rm = TRUE)
+        mean_pla_P1 <- mean(df_P1$w_st[df_P1$arm == 0], na.rm = TRUE)
+        diff_days_P1 <- (mean_evo_P1 - mean_pla_P1) * 30
+
+        # Principle 2
+        df_P2 <- df %>%
+          rowwise() %>%
+          mutate(
+            p1 = time1 * w[1],
+            worst1 = max(1, type1, na.rm = TRUE),
+            p2 = ifelse(is.na(time2), 0, w[worst1] * (time2 - time1)),
+            worst2 = max(c(1, type1, type2), na.rm = TRUE),
+            p3 = ifelse(is.na(time3), 0, w[worst2] * (time3 - time2)),
+            worst3 = max(c(1, type1, type2, type3), na.rm = TRUE),
+            p4 = ifelse(is.na(time4), 0, w[worst3] * (time4 - time3)),
+            worst4 = max(c(1, type1, type2, type3, type4), na.rm = TRUE),
+            p5 = ifelse(is.na(time5), 0, w[worst4] * (time5 - time4)),
+            worst5 = max(c(1, type1, type2, type3, type4, type5), na.rm = TRUE),
+            p6 = ifelse(is.na(time5) | type5 == 0, 0, w[worst5] * (36 - time5)),
+            w_st = p1 + p2 + p3 + p4 + p5 + p6
+          ) %>%
+          ungroup()
+        mean_evo_P2 <- mean(df_P2$w_st[df_P2$arm == 1], na.rm = TRUE)
+        mean_pla_P2 <- mean(df_P2$w_st[df_P2$arm == 0], na.rm = TRUE)
+        diff_days_P2 <- (mean_evo_P2 - mean_pla_P2) * 30
+
+        # Principle 3
+        df_P3 <- df %>%
+          rowwise() %>%
+          mutate(
+            p1 = time1 * w[1],
+            q2 = w[1] * w[type1],
+            p2 = ifelse(is.na(time2), 0, q2 * (time2 - time1)),
+            q3 = q2 * w[type2],
+            p3 = ifelse(is.na(time3), 0, q3 * (time3 - time2)),
+            q4 = q3 * w[type3],
+            p4 = ifelse(is.na(time4), 0, q4 * (time4 - time3)),
+            q5 = q4 * w[type4],
+            p5 = ifelse(is.na(time5), 0, q5 * (time5 - time4)),
+            q6 = q5 * w[type5],
+            p6 = ifelse(is.na(time5) | type5 == 0, 0, q6 * (36 - time5)),
+            w_st = p1 + p2 + p3 + p4 + p5 + p6
+          ) %>%
+          ungroup()
+        mean_evo_P3 <- mean(df_P3$w_st[df_P3$arm == 1], na.rm = TRUE)
+        mean_pla_P3 <- mean(df_P3$w_st[df_P3$arm == 0], na.rm = TRUE)
+        diff_days_P3 <- (mean_evo_P3 - mean_pla_P3) * 30
+
+        # Principle 4
+        df_P4 <- df %>%
+          mutate(w_st = time1 * w[1])
+        mean_evo_P4 <- mean(df_P4$w_st[df_P4$arm == 1], na.rm = TRUE)
+        mean_pla_P4 <- mean(df_P4$w_st[df_P4$arm == 0], na.rm = TRUE)
+        diff_days_P4 <- (mean_evo_P4 - mean_pla_P4) * 30
+
+        # Store results
+        results <- rbind(results, data.frame(
+          w2 = w2_val,
+          w3 = w3_val,
+          w4 = w4_val,
+          w5 = w5_val,
+          principle = c("Markov", "Worst‑state Update", "Cumulative Product", "Naive RMST"),
+          diff_days = c(diff_days_P1, diff_days_P2, diff_days_P3, diff_days_P4),
+          # Store the weights for reference
+          w2_exact = w2_val,
+          w3_exact = w3_val,
+          w4_exact = w4_val,
+          w5_exact = w5_val
+        ))
+      }
+    }
+  }
+}
+
+# Now, for each principle, find the min and max differences and corresponding weights
+extremes <- results %>%
+  group_by(principle) %>%
+  summarize(
+    min_diff_days = min(diff_days, na.rm = TRUE),
+    max_diff_days = max(diff_days, na.rm = TRUE),
+    # Get weights at min
+    w2_at_min = w2_exact[which.min(diff_days)],
+    w3_at_min = w3_exact[which.min(diff_days)],
+    w4_at_min = w4_exact[which.min(diff_days)],
+    w5_at_min = w5_exact[which.min(diff_days)],
+    # Get weights at max
+    w2_at_max = w2_exact[which.max(diff_days)],
+    w3_at_max = w3_exact[which.max(diff_days)],
+    w4_at_max = w4_exact[which.max(diff_days)],
+    w5_at_max = w5_exact[which.max(diff_days)]
+  )
+
+print(extremes)
+```
+
